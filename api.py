@@ -1,10 +1,9 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import joblib
-import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for frontend integration
 
 model = None
 vectorizer = None
@@ -15,9 +14,11 @@ def load_model_and_vectorizer():
         model = joblib.load('phishing_model.pkl')
         vectorizer = joblib.load('tfidf_vectorizer.pkl')
         print("Model and vectorizer loaded successfully!")
+        print("Model classes:", model.classes_)
         return True
     except FileNotFoundError as e:
         print(f"Error loading model files: {e}")
+        print("Make sure 'phishing_model.pkl' and 'tfidf_vectorizer.pkl' are in the same directory as this script")
         return False
 
 def predict_phishing(email_text):
@@ -26,27 +27,29 @@ def predict_phishing(email_text):
 
     try:
         email_tfidf = vectorizer.transform([email_text])
-        prediction = model.predict(email_tfidf)[0]
-        probability = model.predict_proba(email_tfidf)[0]
+        prediction = model.predict(email_tfidf)[0]  # 0 or 1
+        probability = model.predict_proba(email_tfidf)[0]  # e.g. [0.8, 0.2]
+
         confidence_scores = {
             'safe': float(probability[0]),
             'phishing': float(probability[1])
         }
+
         return int(prediction), confidence_scores, None
     except Exception as e:
         return None, None, str(e)
 
 @app.route("/", methods=["GET"])
 def root():
-    model_status = "loaded" if model and vectorizer else "not loaded"
+    model_status = "loaded" if model is not None and vectorizer is not None else "not loaded"
     return jsonify({
         "message": "Phishing Email Detection API is running!",
         "status": "active",
         "model_status": model_status,
         "endpoints": {
-            "predict": "POST /predict",
-            "health": "GET /health",
-            "info": "GET /info"
+            "predict": "POST /predict - Send email text to get phishing prediction",
+            "health": "GET /health - Check API health",
+            "info": "GET /info - Get API information"
         }
     })
 
@@ -82,60 +85,39 @@ def info():
             }
         }
     })
+
 @app.route("/predict", methods=["POST"])
-def predict_route():
+def predict():
     try:
         if model is None or vectorizer is None:
-            print("[ERROR] Model or vectorizer not loaded")
-            return jsonify({ "error": "Model or vectorizer not loaded" }), 500
+            return jsonify({"error": "Model not loaded. Please check server logs."}), 500
 
         data = request.get_json()
-        print("[DEBUG] Raw JSON data:", data)
-
         if not data:
-            return jsonify({ "error": "No JSON received" }), 400
+            return jsonify({"error": "No JSON data provided. Please send email text in JSON format."}), 400
 
         email_text = data.get('email_text', '')
-        if not isinstance(email_text, str):
-            return jsonify({ "error": "'email_text' must be a string" }), 400
+        if not email_text or not isinstance(email_text, str) or len(email_text.strip()) == 0:
+            return jsonify({"error": "Invalid or empty 'email_text' field."}), 400
 
-        email_text = email_text.strip()
-        print("[DEBUG] Email text received:", email_text)
+        prediction, confidence, error = predict_phishing(email_text)
+        if error:
+            return jsonify({"error": f"Prediction failed: {error}"}), 500
 
-        if len(email_text) == 0:
-            return jsonify({ "error": "Email text cannot be empty" }), 400
+        phishing_confidence = confidence.get('phishing', 0)
+        if phishing_confidence >= 0.7:
+            risk_level = "HIGH"
+        elif phishing_confidence >= 0.4:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
 
-        try:
-            email_tfidf = vectorizer.transform([email_text])
-        except Exception as e:
-            print("[ERROR] TF-IDF transform failed:", e)
-            return jsonify({ "error": f"Vectorizer transform failed: {str(e)}" }), 500
-
-        try:
-            prediction_raw = model.predict(email_tfidf)[0]
-
-            # Handle string or numeric outputs
-            if isinstance(prediction_raw, str):
-                prediction = 1 if "phish" in prediction_raw.lower() else 0
-            else:
-                prediction = int(prediction_raw)
-
-            probability = model.predict_proba(email_tfidf)[0]
-        except Exception as e:
-            print("[ERROR] Model prediction failed:", e)
-            return jsonify({ "error": f"Prediction failed: {str(e)}" }), 500
-
-        confidence = {
-            'safe': float(probability[0]),
-            'phishing': float(probability[1])
-        }
-
-        risk_level = "HIGH" if confidence['phishing'] > 0.7 else "MEDIUM" if confidence['phishing'] > 0.4 else "LOW"
+        label = "phishing email" if prediction == 1 else "safe email"
 
         return jsonify({
             "success": True,
             "prediction": prediction,
-            "label": "phishing email" if prediction == 1 else "safe email",
+            "label": label,
             "confidence": confidence,
             "risk_level": risk_level,
             "details": {
@@ -145,9 +127,7 @@ def predict_route():
         })
 
     except Exception as e:
-        print("[EXCEPTION] Unexpected error in /predict:", str(e))
-        return jsonify({ "error": f"Unexpected server error: {str(e)}" }), 500
-
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 @app.errorhandler(404)
 def not_found(error):
@@ -164,9 +144,18 @@ def method_not_allowed(error):
 
 if __name__ == "__main__":
     print("Starting Phishing Email Detection API...")
+    print("Loading model and vectorizer...")
+
     if load_model_and_vectorizer():
         print("✓ Model loaded successfully!")
+        print("✓ Starting Flask server...")
+        print("API will be available at: http://127.0.0.1:5000")
+        print("\nEndpoints:")
+        print("- GET  /        - API info")
+        print("- GET  /health  - Health check")
+        print("- GET  /info    - Detailed API info")
+        print("- POST /predict - Make predictions")
         app.run(debug=True, host='0.0.0.0', port=5000)
         print("Model classes:", model.classes_)
     else:
-        print("✗ Failed to load model. Please check model files.")
+        print("✗ Failed to load model. Please run your training script first to generate the model files.")
